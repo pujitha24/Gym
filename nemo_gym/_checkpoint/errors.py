@@ -63,6 +63,18 @@ class ExportFailedError(ControlError):
     code = "export_failed"
 
 
+class RestoreRecoveryPendingError(ControlError):
+    """A failed restore left admission closed, and its recovery has not finished: no checkpoint may begin yet.
+
+    The recovery finishes on its own once an install that outlived the restore has finished,
+    or when the controller resumes.
+    The controller resumes, then prepares again.
+    """
+
+    status_code = 503
+    code = "restore_recovery_pending"
+
+
 class RestartInScopeError(ControlError):
     """A commit scope names an episode this participant reported as a restart, which it cannot continue."""
 
