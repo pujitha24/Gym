@@ -109,14 +109,20 @@ class TestExtractCode:
         assert extract_code_strict(text) == "y=2"
 
     def test_falls_back_to_generic_fence(self):
-        # Generic ``` fallback only kicks in when ```python is absent. Because
-        # we use rfind for parity with Skills' preprocess_code, a single
-        # generic fence pair has its closing fence as the "last" ``` and
-        # nothing follows it -> strict mode returns "". This matches Skills.
-        # When ```python is also present (the realistic case), the python
-        # fence wins via the prior rfind branch.
         text = "no language tag ```\nz=3\n```"
-        assert extract_code_strict(text) == ""
+        assert extract_code_strict(text) == "z=3"
+
+    def test_prefers_python_fence_over_later_generic_fence(self):
+        text = "```python\nx=1\n``` then ```\noutput\n```"
+        assert extract_code_strict(text) == "x=1"
+
+    def test_last_generic_fence_wins(self):
+        text = "```\na=1\n``` then ```\nb=2\n```"
+        assert extract_code_strict(text) == "b=2"
+
+    def test_unclosed_trailing_python_fence_ignored(self):
+        text = "```python\nx=1\n``` then ```python\nincomplete"
+        assert extract_code_strict(text) == "x=1"
 
     def test_strict_mode_no_closing_fence(self):
         text = "```python\nincomplete"

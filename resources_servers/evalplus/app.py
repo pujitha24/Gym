@@ -34,6 +34,7 @@ benchmark dir (no server changes).
 """
 
 import pickle
+import re
 from asyncio import Semaphore, get_running_loop
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -95,32 +96,27 @@ class EvalPlusVerifyResponse(BaseVerifyResponse):
 # Code extraction
 # ----------------------------
 def extract_code_strict(completion: str, language: str = "python") -> str:
-    """Match Skills' `preprocess_code` last-fence + strict-mode semantics.
+    """Extract the last complete fenced code block from a completion.
 
     Skills additionally strips `<think>...</think>` reasoning preambles;
     we delegate that to the vLLM `--reasoning-parser` flag, so this function
-    operates on already-clean output. If the model emits no closing fence,
-    the extracted code is empty (strict mode), matching Skills.
+    operates on already-clean output. Unclosed blocks are ignored (strict
+    mode), so a completion with no complete block yields an empty string.
 
-    Picks the LAST occurrence of a fenced code block (preferring
-    ```python over a generic ```) so chain-of-thought scratch code blocks
-    don't shadow the final solution.
+    Picks the LAST complete block, preferring ```python over a generic ```
+    block, so chain-of-thought scratch code blocks don't shadow the final
+    solution.
     """
     completion = completion.replace("\r", "")
-    specific_fence = f"```{language}"
-    generic_fence = "```"
-    start = completion.rfind(specific_fence)
-    fence_len = len(specific_fence)
-    if start == -1:
-        start = completion.rfind(generic_fence)
-        fence_len = len(generic_fence)
-    if start == -1:
-        return ""
-    rest = completion[start + fence_len :]
-    end = rest.find(generic_fence)
-    if end == -1:
-        return ""
-    return rest[:end].strip()
+    specific = ""
+    generic = ""
+    for match in re.finditer(r"```([^\n`]*)\n(.*?)```", completion, flags=re.DOTALL):
+        tag = match.group(1).strip()
+        if tag == language:
+            specific = match.group(2)
+        elif tag == "":
+            generic = match.group(2)
+    return (specific or generic).strip()
 
 
 # ----------------------------
