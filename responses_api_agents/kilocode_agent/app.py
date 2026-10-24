@@ -23,6 +23,7 @@ import shlex
 import shutil
 import signal
 from asyncio import Semaphore
+from collections.abc import Mapping
 from pathlib import Path
 from time import perf_counter, time
 from typing import Any, Optional
@@ -36,6 +37,7 @@ from nemo_gym.agents import (
     HARNESS_COMMAND_NOT_STARTED,
     HARNESS_RUNNER_FAILED,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
@@ -48,6 +50,8 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_REQUEST_FAILED,
+    MODEL_REQUEST_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -390,6 +394,16 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read HTTP status from Kilo 7.4.15's APIError; leave grading to the environment."""
+        error = native_result.get("error")
+        if isinstance(error, dict) and error.get("name") == "APIError":
+            data = error.get("data")
+            status = data.get("statusCode") if isinstance(data, dict) else None
+            if type(status) is int and 400 <= status <= 599:
+                return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        return AgentOutcome(failure_kind=AGENT_REQUEST_FAILED)
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
@@ -894,8 +908,10 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             diagnostics=artifacts.log_tail or artifacts.stderr[-4096:],
         )
         if problem is not None:
-            # Agent sessions must not hand a failed run to the verifier, where it would score as a zero.
-            raise RuntimeError(state.redact_diagnostics(problem))
+            # Keep the error and partial output; the EnvironmentServer applies its
+            # grading/retry policy to the reported cause instead of losing it to HTTP 500.
+            response.status = "failed"
+            response.error = ResponseError(code="server_error", message=state.redact_diagnostics(problem)[:2000])
         response.metadata = {
             "harness_execution": "sandbox",
             **(
@@ -910,7 +926,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         else:
             response.usage.input_tokens_details.cached_tokens = None
             response.usage.output_tokens_details.reasoning_tokens = None
-        return response
+        error, _ = _scan_run_events(artifacts.stdout)
+        return self.report_outcome(response, {"error": error})
 
     async def responses(
         self,

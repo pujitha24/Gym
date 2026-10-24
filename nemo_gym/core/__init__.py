@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from nemo_gym.core.failure_kinds import (
         AGENT_INVALID_OUTPUT,
         AGENT_LIMIT,
+        AGENT_REQUEST_FAILED,
         AGENT_ROUTE_FAILED,
         AGENT_RUN_ERROR,
         AGENT_TIMEOUT,
@@ -139,6 +140,7 @@ _PUBLIC_API = {
     "AGENT_LIMIT": "failure_kinds",
     "AGENT_ROUTE_FAILED": "failure_kinds",
     "AGENT_RUN_ERROR": "failure_kinds",
+    "AGENT_REQUEST_FAILED": "failure_kinds",
     "AGENT_TIMEOUT": "failure_kinds",
     "BaseEpisodeRequest": "episode_types",
     "BaseEpisodeResponse": "episode_types",
