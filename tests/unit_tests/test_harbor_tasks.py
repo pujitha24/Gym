@@ -834,6 +834,26 @@ class TestMaterialize:
         assert agent["responses_api_agents"]["hermes_agent"]["enabled_toolsets"] == ["terminal"]
         assert "resources_servers" not in " ".join(config)
 
+    def test_rows_path_under_the_working_directory_is_stored_relative(self, tmp_path, monkeypatch):
+        # Two checkouts of one run must produce the same dataset declaration, or the saved aggregate metrics conflict.
+        declared = []
+        for checkout in ("one", "two"):
+            root = tmp_path / checkout
+            folder = root / "ds"
+            tasks = [load_task(write_task(folder / "a"))]
+            monkeypatch.chdir(root)
+            config = run_config(
+                taskset="ds",
+                folder=folder,
+                tasks=tasks,
+                rows_path=root / "results" / "tasks.jsonl",
+                agent_instance_name="hermes_agent",
+                agent_impl="hermes_agent",
+            )
+            declared.append(config["harbor_ds_agent"]["responses_api_agents"]["hermes_agent"]["datasets"][0])
+        assert declared[0] == declared[1]
+        assert declared[0]["jsonl_fpath"] == str(Path("results") / "tasks.jsonl")
+
 
 class TestTasksetMapping:
     def test_single_task_folder_maps_to_its_parent(self, tmp_path):

@@ -85,6 +85,19 @@ def taskset_mapping(tasks: list[HarborTask], folder: Path) -> dict[str, Any]:
     return {"folder": str(parents.pop().resolve()), "tasks": {task.task_id: task.digest for task in tasks}}
 
 
+def _dataset_path(rows_path: Path) -> str:
+    """The rows path as the run config stores it: relative to the working directory when under it.
+
+    An absolute path embeds the checkout's location, which differs between checkouts of the same run (a job
+    driver that installs Gym into a fresh directory) and would conflict in the saved aggregate metrics.
+    """
+    resolved = Path(rows_path).resolve()
+    try:
+        return str(resolved.relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(resolved)
+
+
 def run_config(
     *,
     taskset: str,
@@ -119,7 +132,7 @@ def run_config(
                             # Harbor task folders carry no dataset-level license; the run config
                             # needs one for a validation split, so it is left to be determined.
                             "license": "TBD",
-                            "jsonl_fpath": str(Path(rows_path).resolve()),
+                            "jsonl_fpath": _dataset_path(rows_path),
                         }
                     ],
                     **(agent_overrides or {}),
