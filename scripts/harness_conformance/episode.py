@@ -178,7 +178,11 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
     probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
-    probe = probe_cls(scenario, directory)
+    # Pi checks thresholds after the tool loop, so exercise its automatic
+    # overflow recovery while the shared shell task is still unfinished.
+    probe = probe_cls(
+        scenario, directory, compaction_overflow_after=7 if harness == "pi" and scenario.compaction else None
+    )
     probe.save()
     tasks = []
     servers = []
