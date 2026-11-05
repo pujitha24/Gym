@@ -157,13 +157,22 @@ def benchmark_config(**overrides):
 
 def test_profile_defaults_match_terminal_bench_4_and_harbor():
     config = benchmark_config()
-    agent = config.terminal_bench_science_miniswe.responses_api_agents.miniswe_sandboxed_agent
-    assert agent.resources_server.name == "terminal_bench_science"
-    benchmark = next(dataset for dataset in agent.datasets if dataset.type == "benchmark")
+    agent = config.terminal_bench_science_miniswe_agent.responses_api_agents.miniswe_sandboxed_agent
+    assert agent.resources_server.name == "terminal_bench_science_miniswe_resources_server"
+    lending = config.terminal_bench_science_miniswe_resources_server.resources_servers.terminal_bench_4
+    # Rows carry only the task identity; the seed's observation is the official instruction.
+    assert lending.instruction_observation is True
+    benchmark = next(dataset for dataset in lending.datasets if dataset.type == "benchmark")
     # One trial per task, as terminal_bench_4/miniswe; ++num_repeats=3 runs the official protocol.
     assert benchmark.num_repeats == 1
     # Harbor's mini-swe-agent: no step cap, 30-second command timeout, task-owned 8-hour budget.
     assert (agent.harness.step_limit, agent.harness.step_timeout_sec, agent.agent_max_timeout_sec) == (0, 30, None)
+    assert agent.agent_timeout_sec == 28800
+    environment_server = config.terminal_bench_science_miniswe.environment_servers.single_agent_turn_legacy
+    assert environment_server.resources_server.name == "terminal_bench_science_miniswe_resources_server"
+    assert environment_server.agent_server.name == "terminal_bench_science_miniswe_agent"
+    # The 8-hour agent budget and the slowest verifier (12000 seconds) fit in one episode.
+    assert environment_server.default_episode_timeout_seconds >= 28800 + 12000
     resources = config.terminal_bench_science.resources_servers.terminal_bench_4
     environment = resources.environment
     # Seeded sessions outlive the 8-hour agent budget; commands outlive the 12000-second verifier.
@@ -208,7 +217,7 @@ def test_image_overrides_reach_the_validated_resources_config(tmp_path):
         tbsci_jobs_dir=str(tmp_path / "jobs"),
         tbsci_max_steps=3,
     )
-    agent = config.terminal_bench_science_miniswe.responses_api_agents.miniswe_sandboxed_agent
+    agent = config.terminal_bench_science_miniswe_agent.responses_api_agents.miniswe_sandboxed_agent
     assert agent.harness.step_limit == 3
     assert agent.artifacts_dir == str(tmp_path / "jobs/agent")
     resources = OmegaConf.to_container(config.terminal_bench_science.resources_servers.terminal_bench_4, resolve=True)
@@ -892,13 +901,32 @@ def test_codex_rows_hand_off_only_once_and_only_without_pathspec(monkeypatch):
     assert not prepare_codex._needs_server_environment()
 
 
+@pytest.mark.parametrize("profile", ["codex.yaml", "miniswe.yaml"])
+def test_borrowing_profiles_lend_through_the_shared_provider_blocks(profile):
+    config = OmegaConf.merge(OmegaConf.load(BENCHMARK_DIR / "resources.yaml"), OmegaConf.load(BENCHMARK_DIR / profile))
+    name = profile.removesuffix(".yaml")
+    assert config[f"terminal_bench_science_{name}_resources_server"]._inherit_from == "terminal_bench_science"
+    lending = config.terminal_bench_science.resources_servers.terminal_bench_4
+    assert lending.sandbox_provider_ref == "terminal_bench_science_sandbox"
+    assert dict(lending.sandbox_provider_refs) == {
+        "cpu": "terminal_bench_science_sandbox_cpu",
+        "gpu": "terminal_bench_science_sandbox_gpu",
+    }
+    for block, suffix in [("", ""), ("_cpu", "_CPU"), ("_gpu", "_GPU")]:
+        provider = config[f"terminal_bench_science_sandbox{block}"]
+        assert list(provider) == ["opensandbox"]
+        domain = OmegaConf.to_container(provider.opensandbox.connection)["domain"]
+        assert domain == f"${{oc.env:OPENSANDBOX_DOMAIN{suffix},localhost}}"
+        assert provider.opensandbox.operations.background_exec is True
+
+
 def test_codex_profile_composes_borrowing_resources_codex_and_the_environment_server():
     config = OmegaConf.load(BENCHMARK_DIR / "codex.yaml")
     resources = config.terminal_bench_science_codex_resources_server.resources_servers.terminal_bench_4
     agent = config.terminal_bench_science_codex_agent.responses_api_agents.codex_agent
     environment = config.terminal_bench_science_codex.environment_servers.single_agent_turn_legacy
-    assert resources.sandbox_provider_ref == "terminal_bench_science_sandbox"
-    assert list(config.terminal_bench_science_sandbox) == ["opensandbox"]
+    # Codex rows embed the instruction (prepare_codex.py), so the seed adds no observation.
+    assert "instruction_observation" not in resources
     assert resources.datasets[0].num_repeats == 1
     assert environment.resources_server.name == "terminal_bench_science_codex_resources_server"
     assert environment.agent_server.name == "terminal_bench_science_codex_agent"

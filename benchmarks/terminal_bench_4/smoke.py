@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run real agent/resources smoke checks in CPU, Compose, GPU order.
+"""Run real environment/agent/resources smoke checks in CPU, Compose, GPU order.
 
-Uses loopback HTTP between Gym services. mini-SWE routes model calls through
-the local Gym model server.
+Uses loopback HTTP between Gym services. Each task row goes through the profile's
+single_agent_turn_legacy Environment Server, as in a benchmark run. mini-SWE routes
+model calls through the local Gym model server.
 """
 
 import argparse
@@ -22,6 +23,10 @@ import uvicorn
 from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
+from environment_servers.single_agent_turn_legacy.app import (
+    SingleAgentTurnLegacyEnvironmentServer,
+    SingleAgentTurnLegacyEnvironmentServerConfig,
+)
 from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient, http_client
 from nemo_gym.config import BaseServerConfig, global_config
 from nemo_gym.rollouts import merge_model_call_capture_into_record, run_health_checks
@@ -64,6 +69,9 @@ async def main(args):
             "nemo_gym/sandbox/adapters/docker_compose.py",
             "nemo_gym/sandbox/providers/opensandbox/provider.py",
             "benchmarks/terminal_bench_4/resources.yaml",
+            "benchmarks/terminal_bench_4/miniswe.yaml",
+            "environment_servers/single_agent_turn/app.py",
+            "environment_servers/single_agent_turn_legacy/app.py",
             "benchmarks/terminal_bench_4/manifest.json",
             "benchmarks/terminal_bench_4/compose-images.json",
             "resources_servers/terminal_bench_4/compose_config.py",
@@ -101,7 +109,16 @@ async def main(args):
             indent=2,
         )
     )
-    config = OmegaConf.load(root / "resources.yaml")
+    profile = OmegaConf.load(root / f"{args.harness}.yaml")
+    # The profile's own config_paths, then its blocks, each over the block it inherits from, as Gym composes them.
+    config = OmegaConf.merge(*(OmegaConf.load(source_root / path) for path in profile.pop("config_paths")), profile)
+    names = {
+        "resources": f"terminal_bench_4_{args.harness}_resources_server",
+        "agent": f"terminal_bench_4_{args.harness}_agent",
+        "environment": f"terminal_bench_4_{args.harness}",
+    }
+    for name in names.values():
+        config[name] = OmegaConf.merge(config.pop(config[name].pop("_inherit_from")), config[name])
     config.observability_enabled = True
     capture_dir = args.output / "model_calls"
     config.model_call_capture_dir = str(capture_dir)
@@ -110,15 +127,13 @@ async def main(args):
     config.tb4_jobs_dir = str(args.output / "resources")
     config.tb4_agent_artifacts_dir = str(args.output / "agent")
     config.tb4_max_steps = args.steps
-    agent_name = "terminal_bench_4_" + args.harness
-    profile = OmegaConf.load(root / f"{args.harness}.yaml")
-    del profile["config_paths"]
-    config = OmegaConf.merge(config, profile)
-    ports = {name: free_port() for name in ["terminal_bench_4", agent_name, "policy_model"]}
-    resource_config = config.terminal_bench_4.resources_servers.terminal_bench_4
+    ports = {name: free_port() for name in [*names.values(), "policy_model"]}
+    resource_config = config[names["resources"]].resources_servers.terminal_bench_4
+    resource_config.datasets = []
     resource_config.task_download_dir = str(args.task_cache)
     resource_config.environment.sandbox_metadata["nemo-gym.nvidia.com/run"] = args.output.name
-    agent_config = next(iter(config[agent_name].responses_api_agents.values()))
+    agent_config = next(iter(config[names["agent"]].responses_api_agents.values()))
+    environment_config = config[names["environment"]].environment_servers.single_agent_turn_legacy
     model_config = {
         "host": host,
         "port": ports["policy_model"],
@@ -129,7 +144,7 @@ async def main(args):
         "openai_model": args.model,
     }
     config.policy_model = {"responses_api_models": {"openai_model": model_config}}
-    for name, values in [("terminal_bench_4", resource_config), (agent_name, agent_config)]:
+    for name, values in zip(names.values(), [resource_config, agent_config, environment_config], strict=True):
         values.update({"name": name, "host": host, "port": ports[name]})
     config = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
     global_config._GLOBAL_CONFIG_DICT = config
@@ -143,10 +158,18 @@ async def main(args):
         config=MiniSWESandboxedConfig.model_validate(OmegaConf.to_container(agent_config, resolve=True)),
         server_client=client,
     )
+    environment = SingleAgentTurnLegacyEnvironmentServer(
+        config=SingleAgentTurnLegacyEnvironmentServerConfig.model_validate(
+            OmegaConf.to_container(environment_config, resolve=True)
+        ),
+        server_client=client,
+    )
     model = SimpleModelServer(config=SimpleModelServerConfig.model_validate(model_config), server_client=client)
     servers = [
         uvicorn.Server(uvicorn.Config(instance.setup_webserver(), host=host, port=ports[name], log_level="warning"))
-        for name, instance in [("terminal_bench_4", resource), (agent_name, agent), ("policy_model", model)]
+        for name, instance in zip(
+            [*names.values(), "policy_model"], [resource, agent, environment, model], strict=True
+        )
     ]
     workers = [asyncio.create_task(s.serve()) for s in servers]
     while not all(s.started for s in servers):
@@ -172,7 +195,7 @@ async def main(args):
             try:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
                     async with session.post(
-                        f"http://{host}:{ports[agent_name]}/run",
+                        f"http://{host}:{ports[names['environment']]}/run",
                         json={
                             "task_id": f"terminal-bench/{task['name']}",
                             "task_name": "terminal-bench/" + task["name"],

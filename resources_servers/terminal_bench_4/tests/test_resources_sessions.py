@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -28,6 +29,7 @@ from resources_servers.terminal_bench_4.models import (
     ResourcesSessionVerifyRequest,
     SeedSessionResponse,
 )
+from resources_servers.terminal_bench_4.task import MCPServer
 from resources_servers.terminal_bench_4.tests.test_environment import make_environment
 
 
@@ -36,10 +38,22 @@ TASK = "atrx-vep-crispr"
 OTHER_TASK = "batched-eval-parity"
 
 
+class FakeSandbox:
+    """The task sandbox: records each command and succeeds."""
+
+    def __init__(self) -> None:
+        self.commands: list[tuple[str, dict]] = []
+
+    async def exec(self, command: str, **kwargs) -> SimpleNamespace:
+        self.commands.append((command, kwargs))
+        return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+
+
 class FakeEnvironment:
-    def __init__(self, workdir: str = "/app") -> None:
+    def __init__(self, workdir: str = "/app", pool: str = "default") -> None:
         self.workdir = workdir
-        self.main = None
+        self.pool = pool
+        self.main = FakeSandbox()
         self.uses_compose = False
         self.closed = False
         self.stops = 0
@@ -80,6 +94,9 @@ class Harness:
             "category": "cpu",
         }
         self.agent_user = None
+        self.mcp_servers: list[MCPServer] = []
+        self.skills_dir: str | None = None
+        self.pool = "default"
         self.prepare_error: Exception | None = None
         self.prepared = 0
         self.graded: list[bool] = []
@@ -94,8 +111,15 @@ class Harness:
     async def _prepare(self, session) -> None:
         self.prepared += 1
         await self.release_prepare.wait()
-        session.task = SimpleNamespace(config=SimpleNamespace(agent=SimpleNamespace(user=self.agent_user)))
-        session.environment, session.verifier_environment = FakeEnvironment(), FakeEnvironment()
+        session.task = SimpleNamespace(
+            instruction="Solve the task.",
+            config=SimpleNamespace(
+                agent=SimpleNamespace(user=self.agent_user),
+                environment=SimpleNamespace(mcp_servers=self.mcp_servers, skills_dir=self.skills_dir),
+            ),
+        )
+        session.environment = FakeEnvironment(pool=self.pool)
+        session.verifier_environment = FakeEnvironment(pool=self.pool)
         self.environments += [session.environment, session.verifier_environment]
         session.result["environment_setup"] = {"started_at": "t0", "finished_at": "t1"}
         if self.prepare_error is not None:
@@ -555,11 +579,61 @@ async def test_verify_rejects_another_task_without_consuming_the_session(harness
 
 
 async def test_seed_requires_a_provider_reference(tmp_path, monkeypatch) -> None:
-    harness = Harness(tmp_path, monkeypatch)
+    harness = Harness(tmp_path, monkeypatch, sandbox_provider_ref=None)
     with pytest.raises(HTTPException) as error:
         await harness.server.seed_session(SimpleNamespace(session={}), harness.seed())
     assert error.value.status_code == 422
     assert harness.prepared == 0
+
+
+async def test_split_endpoints_lend_the_block_of_the_tasks_pool(tmp_path, monkeypatch) -> None:
+    harness = Harness(tmp_path, monkeypatch, sandbox_provider_ref=None, environment={"sandbox_split_endpoints": True})
+    harness.server.config.sandbox_provider_refs = {"cpu": "cpu_sandbox", "gpu": "gpu_sandbox"}
+    harness.pool = "gpu"
+    seeded = await harness.server.seed_session(SimpleNamespace(session={}), harness.seed())
+    assert seeded.sandbox_access.connection.provider_config_ref == "gpu_sandbox"
+
+
+@pytest.mark.parametrize("refs", [{}, {"cpu": "cpu_sandbox"}])
+async def test_split_endpoints_require_a_block_for_each_pool(tmp_path, monkeypatch, refs) -> None:
+    harness = Harness(
+        tmp_path, monkeypatch, sandbox_provider_ref="task_sandbox", environment={"sandbox_split_endpoints": True}
+    )
+    harness.server.config.sandbox_provider_refs = refs
+    with pytest.raises(HTTPException) as error:
+        await harness.server.seed_session(SimpleNamespace(session={}), harness.seed())
+    assert error.value.status_code == 422
+    assert "sandbox_provider_refs" in error.value.detail
+    assert harness.prepared == 0
+
+
+async def test_instruction_observation_carries_the_official_instruction(tmp_path, monkeypatch) -> None:
+    harness = Harness(tmp_path, monkeypatch, sandbox_provider_ref="task_sandbox", instruction_observation=True)
+    seeded = await harness.server.seed_session(SimpleNamespace(session={}), harness.seed())
+    assert seeded.observation == "Solve the task."
+    assert seeded.model_dump(mode="json")["observation"] == "Solve the task."
+
+
+async def test_task_tool_declarations_reach_the_borrower_in_task_json(harness) -> None:
+    harness.mcp_servers = [MCPServer(name="playwright", transport="sse", url="http://playwright-mcp:3080/sse")]
+    harness.skills_dir = "/app/.agents/skills"
+    await harness.server.seed_session(SimpleNamespace(session={}), harness.seed())
+    session = next(iter(harness.server._sessions.values()))
+    [(command, kwargs)] = session.environment.main.commands
+    assert kwargs["user"] == "root"
+    assert command.startswith("mkdir -p /tmp/.nemo-gym && printf %s ")
+    written = shlex.split(command.split(" && ")[1])[2]
+    playwright = {"name": "playwright", "transport": "sse", "url": "http://playwright-mcp:3080/sse"}
+    assert json.loads(written) == {
+        "mcp_servers": [playwright | {"command": None, "args": []}],
+        "skills_dir": "/app/.agents/skills",
+    }
+
+
+async def test_tasks_without_tool_declarations_get_no_task_json(harness) -> None:
+    await harness.server.seed_session(SimpleNamespace(session={}), harness.seed())
+    session = next(iter(harness.server._sessions.values()))
+    assert session.environment.main.commands == []
 
 
 async def test_seed_rejects_an_unpinned_task(harness) -> None:

@@ -1,20 +1,21 @@
 # Sandboxed mini-SWE
 
 > [!WARNING]
-> **The legacy `/run` path is deprecated.** With `resources_server` set, as in the benchmark presets
-> (for example [`benchmarks/terminal_bench_4/miniswe.yaml`](../../benchmarks/terminal_bench_4/miniswe.yaml)),
-> this agent runs each episode through its own `/run` behind a `legacy_agent` environment server.
-> That path will be removed after the environment-server migration, and the agent logs a deprecation
-> warning when it starts with a `resources_server`. Do not build new benchmarks, agents or configs on it.
+> **The legacy `/run` path is deprecated.** Called directly, this agent seeds and verifies each episode
+> against its `resources_server` through its own `/run`. That path will be removed after the
+> environment-server migration, and the agent logs a deprecation warning on its first `/run` call. Do not
+> build new benchmarks, agents or configs on it.
 >
-> Episode sessions under an environment server are not deprecated: see [Harbor episodes](#harbor-episodes).
-> Terminal Bench 4 runs that way from its Harbor task folders (`gym eval run terminal_bench_4 --agent
-> miniswe_sandboxed_agent`; see [`environments/harbor/terminal_bench_4`](../../environments/harbor/terminal_bench_4/README.md)).
-> Terminal-Bench-Science has no session path yet and stays on `/run` until it does.
+> Episode sessions under an environment server are not deprecated. The benchmark profiles
+> [`benchmarks/terminal_bench_4/miniswe.yaml`](../../benchmarks/terminal_bench_4/miniswe.yaml) and
+> [`benchmarks/terminal_bench_science/miniswe.yaml`](../../benchmarks/terminal_bench_science/miniswe.yaml)
+> run behind `single_agent_turn_legacy` on a task sandbox the TB4 resources server lends through
+> `SandboxAccess`; their `resources_server` only routes the dataset to this agent. Harbor tasks run the
+> same way from their task folders: see [Harbor episodes](#harbor-episodes).
 
 Run pinned mini-SWE 2.4.6 directly in a resource-owned Linux sandbox, using its
 native CLI, `DefaultAgent`, `LocalEnvironment`, and `litellm_response` model.
-The legacy `/run` path uses [the TB4 profile](../../benchmarks/terminal_bench_4/miniswe.yaml) with
+The [TB4 profile](../../benchmarks/terminal_bench_4/miniswe.yaml) runs it on episode sessions with
 [TB4 resources](../../resources_servers/terminal_bench_4/README.md).
 
 `harness.py` supplies execution and trajectory conversion; it imports no benchmark
@@ -48,8 +49,8 @@ run's model and sandbox provider, and the Harbor environment server drives the s
 3. `/v1/agent_sessions/close` releases the transport; the environment server verifies
    and stops the sandbox.
 
-`resources_server` is optional on this path and is only used by the legacy `/run`
-route, which seeds and verifies against a TB4-style resources server. Two kinds of
+`resources_server` is optional on this path. The legacy `/run` route seeds and
+verifies against it; a benchmark profile sets it only to route its dataset. Two kinds of
 timeout are told apart: a setup failure or a setup timeout (the harness never started,
 the sandbox is untouched) is a `503`, so the environment server masks the episode and
 it is retried, while an execution timeout is the agent's own result, returned with

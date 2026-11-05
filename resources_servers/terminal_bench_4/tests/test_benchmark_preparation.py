@@ -92,11 +92,40 @@ def test_explicit_names_and_invalid_selections(tmp_path, monkeypatch):
 def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps, timeout):
     root = Path(preparation.__file__).resolve().parents[2]
     config = OmegaConf.merge(OmegaConf.load(root / "benchmarks/terminal_bench_4/miniswe.yaml"), overrides)
-    agent = config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent
+    agent = config.terminal_bench_4_miniswe_agent.responses_api_agents.miniswe_sandboxed_agent
     harness = agent.harness
     assert harness.step_limit == steps
     assert harness.step_timeout_sec == timeout
-    assert agent.datasets[0].num_repeats == 1
+    resources = config.terminal_bench_4_miniswe_resources_server.resources_servers.terminal_bench_4
+    assert resources.datasets[0].num_repeats == 1
+
+
+def test_profile_composes_lending_resources_miniswe_and_the_environment_server():
+    config = OmegaConf.merge(
+        OmegaConf.load(preparation.BENCHMARK_DIR / "resources.yaml"),
+        OmegaConf.load(preparation.BENCHMARK_DIR / "miniswe.yaml"),
+    )
+    resources = config.terminal_bench_4_miniswe_resources_server
+    agent = config.terminal_bench_4_miniswe_agent.responses_api_agents.miniswe_sandboxed_agent
+    environment = config.terminal_bench_4_miniswe.environment_servers.single_agent_turn_legacy
+    assert resources._inherit_from == "terminal_bench_4"
+    # Rows carry only the task identity; the seed's observation is the official instruction.
+    assert resources.resources_servers.terminal_bench_4.instruction_observation is True
+    # The inherited server lends through one block, or each pool's with split endpoints, as its sandboxes run.
+    lending = config.terminal_bench_4.resources_servers.terminal_bench_4
+    blocks = [lending.sandbox_provider_ref, *lending.sandbox_provider_refs.values()]
+    assert dict(lending.sandbox_provider_refs).keys() == {"cpu", "gpu"}
+    for name, suffix in zip(blocks, ["", "_CPU", "_GPU"], strict=True):
+        connection = config[name].opensandbox.connection
+        assert OmegaConf.to_container(connection)["domain"] == f"${{oc.env:OPENSANDBOX_DOMAIN{suffix},localhost}}"
+        assert connection.request_timeout_s == 300
+        assert config[name].opensandbox.operations.background_exec is True
+    assert agent.resources_server.name == "terminal_bench_4_miniswe_resources_server"
+    assert agent.agent_timeout_sec == 28800
+    assert environment.resources_server.name == "terminal_bench_4_miniswe_resources_server"
+    assert environment.agent_server.name == "terminal_bench_4_miniswe_agent"
+    # The 8-hour agent budget and the slowest verifier (18000 seconds) fit in one episode.
+    assert environment.default_episode_timeout_seconds >= 28800 + 18000
 
 
 @pytest.mark.parametrize(
@@ -110,4 +139,4 @@ def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps
 )
 def test_agent_artifacts_follow_run_directory_unless_overridden(overrides, expected):
     config = OmegaConf.merge(OmegaConf.load(preparation.BENCHMARK_DIR / "miniswe.yaml"), overrides)
-    assert config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent.artifacts_dir == expected
+    assert config.terminal_bench_4_miniswe_agent.responses_api_agents.miniswe_sandboxed_agent.artifacts_dir == expected

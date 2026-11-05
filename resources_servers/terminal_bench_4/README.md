@@ -134,7 +134,14 @@ shared resources-session protocol instead of the contract above, as
   returns `sandbox_access`: a direct connection through the top-level sandbox provider
   block named by `sandbox_provider_ref` (it must describe the same provider as
   `environment.sandbox_provider`), and the task's working directory as its user sees
-  it. Seeds are idempotent per `resources_session_id`; a changed request is rejected.
+  it. With `environment.sandbox_split_endpoints`, the block is
+  `sandbox_provider_refs.cpu` or `.gpu`, after the deployment the task's sandboxes
+  run on. A task that declares `mcp_servers` or `skills_dir` gets them in
+  `/tmp/.nemo-gym/task.json` in its sandbox, as Harbor episodes do. With
+  `instruction_observation: true`, the reply's `observation` is the task's
+  instruction, which the Environment Server appends to the agent's input, for rows
+  that carry no prompt. Seeds are idempotent per `resources_session_id`; a changed
+  request is rejected.
 - `/verify` with the task row, `responses_create_params`, and the agent's `response`
   grades once, as above; the session cookie names the episode. Termination comes from
   `response.status`: `completed`, `incomplete` (`timeout`, or `nonzero_exit` for
@@ -154,8 +161,7 @@ shared resources-session protocol instead of the contract above, as
 
 The borrower runs as the sandbox's default user, so tasks that declare
 `agent.user` are rejected with HTTP 422, and the access carries no agent timeout:
-configure the harness timeout from the task's `agent.timeout_sec`. Split sandbox
-endpoints are not supported in this mode.
+configure the harness timeout from the task's `agent.timeout_sec`.
 
 ## Other pinned Harbor datasets
 

@@ -50,7 +50,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
 )
 from nemo_gym.trajectory import AgentObservationBundle
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,
     HarnessOutcome,
@@ -68,22 +68,21 @@ from responses_api_agents.miniswe_sandboxed_agent.models import (
 
 LOGGER = logging.getLogger(__name__)
 
-# Episode sessions under an environment server are not deprecated; only the flat /run path, which a configured
-# resources_server selects, is.
+# Episode sessions under an environment server are not deprecated; only the flat /run path is. A configured
+# resources_server also routes a benchmark's dataset to this agent behind single_agent_turn_legacy, so the warning
+# comes with the first /run call, not with the configuration.
 DEPRECATION_WARNING = (
-    "DEPRECATED: miniswe_sandboxed_agent is configured for its legacy /run path (resources_server is set), which "
-    "will be removed after the environment-server migration. Run Harbor tasks on episode sessions instead "
-    "(gym eval run <tasks> --agent miniswe_sandboxed_agent; for TB4, gym eval run terminal_bench_4 --agent "
-    "miniswe_sandboxed_agent). Terminal-Bench-Science has no session path yet and keeps working here. "
+    "DEPRECATED: miniswe_sandboxed_agent received a call on its legacy /run path, which will be removed after the "
+    "environment-server migration. Run episodes behind an environment server instead: the terminal_bench_4/miniswe "
+    "and terminal_bench_science/miniswe benchmarks run behind single_agent_turn_legacy, and Harbor tasks run "
+    "with gym eval run <tasks> --agent miniswe_sandboxed_agent. "
     "See responses_api_agents/miniswe_sandboxed_agent/README.md#harbor-episodes."
 )
 
 
 @cache
 def _warn_deprecated_once() -> None:
-    # Workers of a multi-worker server rebuild it after the main process has already logged this.
-    if not is_nemo_gym_fastapi_worker():
-        LOGGER.warning(DEPRECATION_WARNING)
+    LOGGER.warning(DEPRECATION_WARNING)
 
 
 # The harbor resources server leaves the task's in-sandbox tool declarations here at seed time.
@@ -131,7 +130,8 @@ class MiniSWEEpisodeSession(AgentSessionState):
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
     num_workers: Literal[1] = 1
     # The resources server the legacy `/run` path seeds and verifies against. Episode sessions
-    # (`/v1/agent_sessions`) receive the sandbox from the environment server and need none.
+    # (`/v1/agent_sessions`) receive the sandbox from the environment server and need none; a benchmark behind
+    # single_agent_turn_legacy sets it only to route its dataset to this agent.
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     sandbox_model_base_url: str | None = None
@@ -235,8 +235,6 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
-        if self.config.resources_server is not None:
-            _warn_deprecated_once()
         self._runs = {}
         self._sessions: dict[tuple[str, str], MiniSWESession] = {}
         self._finalizers = set()
@@ -598,6 +596,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
     # -- legacy /run: this agent seeds and verifies against a TB4-style resources server ---------------
 
     async def run(self, request: Request, body: MiniSWERunRequest) -> MiniSWEVerifyResponse:
+        _warn_deprecated_once()
         if self._closing:
             raise HTTPException(503, "Agent server is shutting down")
         if self.config.resources_server is None:

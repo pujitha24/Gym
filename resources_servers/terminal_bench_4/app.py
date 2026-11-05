@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import re
+import shlex
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -32,7 +33,7 @@ from nemo_gym.core import (
     rollout_context,
 )
 from nemo_gym.rollouts import NG_TERMINAL_KEY
-from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, sandbox_credentials_rejected
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, exec_as_root, sandbox_credentials_rejected
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     ResourcesCloseSessionRequest,
@@ -81,6 +82,12 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     # Top-level sandbox provider block equivalent to environment.sandbox_provider. Agents that
     # borrow the task sandbox through SandboxAccess (Environment Server sessions) reconnect with it.
     sandbox_provider_ref: str | None = None
+    # With environment.sandbox_split_endpoints, the blocks lent in place of sandbox_provider_ref, keyed by the endpoint
+    # pool ("cpu" or "gpu") the task's sandboxes run on. Each must describe that pool's deployment.
+    sandbox_provider_refs: dict[Literal["cpu", "gpu"], str] = Field(default_factory=dict)
+    # Return the task's instruction as the SandboxAccess seed's observation, which the Environment Server appends to
+    # the agent's input as one user message, for rows without a prompt. Rows that embed it (prepare_codex.py) do not.
+    instruction_observation: bool = False
     session_close_retry_window_seconds: float = Field(
         default=300,
         gt=0,
@@ -92,6 +99,9 @@ class TerminalBench4Config(BaseResourcesServerConfig):
 # Users a SandboxAccess borrower runs as: the access carries no user, so harnesses execute as
 # the sandbox's default user, which is root for every image this server provisions.
 _DEFAULT_AGENT_USERS = (None, "root", 0, "0")
+# Where a SandboxAccess borrower reads the task's MCP servers and skills directory, as Harbor episodes leave them.
+_TASK_CONTEXT_DIR = "/tmp/.nemo-gym"
+_TASK_CONTEXT_FILE = f"{_TASK_CONTEXT_DIR}/task.json"
 _RESOURCES_SESSION_KEY = "tb4_resources_session_id"
 
 
@@ -455,10 +465,11 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         and ``/close_session`` releases whatever remains. Seeds are idempotent per
         ``resources_session_id``; a changed request, or any seed after close, is rejected.
         """
-        if self.config.sandbox_provider_ref is None:
-            raise HTTPException(422, "Set sandbox_provider_ref to lend task sandboxes through SandboxAccess")
         if self.config.environment.sandbox_split_endpoints:
-            raise HTTPException(422, "Split sandbox endpoints cannot be lent through one provider reference")
+            if not {"cpu", "gpu"} <= self.config.sandbox_provider_refs.keys():
+                raise HTTPException(422, "Set sandbox_provider_refs.cpu and .gpu to lend split-endpoint sandboxes")
+        elif self.config.sandbox_provider_ref is None:
+            raise HTTPException(422, "Set sandbox_provider_ref to lend task sandboxes through SandboxAccess")
         try:
             identity = TaskIdentity.model_validate(body.task_data)
         except ValidationError as error:
@@ -535,16 +546,22 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 workdir = await session.environment.agent_workdir()
                 if not PurePosixPath(workdir).is_absolute():
                     raise RuntimeError(f"Task working directory is not absolute: {workdir!r}")
+                await self._write_task_context(session)
                 self._raise_if_closed_during_setup(session)
+                # Split endpoints create each task's sandboxes in its pool's deployment; "default" is the only one.
+                pool = session.environment.pool
                 session.resources_response = ResourcesSeedSessionResponse(
                     resources_session_id=session.resources_request.resources_session_id,
                     sandbox_access=SandboxAccess(
                         connection=DirectSandboxConnection(
-                            provider_config_ref=self.config.sandbox_provider_ref,
+                            provider_config_ref=self.config.sandbox_provider_refs.get(
+                                pool, self.config.sandbox_provider_ref
+                            ),
                             descriptor=session.seed_response.sandbox_descriptor,
                         ),
                         workdir=workdir,
                     ),
+                    **({"observation": session.task.instruction} if self.config.instruction_observation else {}),
                 )
                 session.persist()
             except (Exception, asyncio.CancelledError) as exc:
@@ -561,6 +578,29 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 )
                 # A late seed that performs a fenced close's teardown starts its retention window.
                 self._remember_close(key, session)
+
+    @staticmethod
+    async def _write_task_context(session: Session) -> None:
+        """Leave the task's MCP servers and skills directory in its sandbox for the borrowing harness.
+
+        The legacy seed reply carries them, SandboxAccess does not: as Harbor episodes do, they go to
+        ``/tmp/.nemo-gym/task.json``, which mini-SWE reads at its first turn. A task declaring neither gets no file.
+        """
+        environment = session.task.config.environment
+        if not environment.mcp_servers and not environment.skills_dir:
+            return
+        context = {
+            "mcp_servers": [server.model_dump(mode="json") for server in environment.mcp_servers],
+            "skills_dir": environment.skills_dir,
+        }
+        result = await exec_as_root(
+            session.environment.main,
+            f"mkdir -p {_TASK_CONTEXT_DIR} && printf %s {shlex.quote(json.dumps(context))} > {_TASK_CONTEXT_FILE} "
+            f"&& (chmod 755 {_TASK_CONTEXT_DIR} && chmod 644 {_TASK_CONTEXT_FILE} || true)",
+            timeout_s=60,
+        )
+        if result.return_code:
+            raise RuntimeError(f"Could not write {_TASK_CONTEXT_FILE}: {result.stderr or result.stdout}")
 
     def _raise_if_closed_during_setup(self, session: Session) -> None:
         if session.resources_request.resources_session_id in self._closed_resources:

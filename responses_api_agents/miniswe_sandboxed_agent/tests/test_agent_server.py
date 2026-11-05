@@ -15,7 +15,6 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.server_runtime import RolloutContextMiddleware
-from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
 from responses_api_agents.miniswe_sandboxed_agent.models import MiniSWERunRequest, SeedSessionResponse
@@ -497,35 +496,36 @@ async def test_cancellation_during_cleanup_delays_transport_release_and_verifica
     assert not f.agent._sessions
 
 
-@pytest.mark.parametrize(("legacy_run", "worker"), [(True, False), (False, False), (True, True)])
-def test_only_the_legacy_run_configuration_logs_the_deprecation_once(
-    tmp_path, caplog, monkeypatch, legacy_run, worker
-):
-    """A resources_server selects the deprecated flat /run path; episode sessions start without a warning.
-
-    Workers of a multi-worker server rebuild it after the main process has logged the warning.
+async def test_only_legacy_run_calls_log_the_deprecation_once(tmp_path, caplog):
+    """Configuration alone logs nothing: a resources_server also routes a benchmark's dataset to this agent
+    behind single_agent_turn_legacy. The first call on the flat /run path logs the deprecation, once.
     """
     module._warn_deprecated_once.cache_clear()
-    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
     config = module.MiniSWESandboxedConfig(
         host="localhost",
         port=1,
         name="agent",
         entrypoint="app.py",
-        resources_server={"type": "resources_servers", "name": "terminal_bench_4"} if legacy_run else None,
+        resources_server={"type": "resources_servers", "name": "terminal_bench_4"},
         model_server={"type": "responses_api_models", "name": "model"},
         artifacts_dir=tmp_path,
     )
     with caplog.at_level(logging.WARNING, logger=module.__name__):
+        agent = module.MiniSWESandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        assert not [r for r in caplog.records if r.name == module.__name__]
+        agent._closing = True
         for _ in range(2):
-            module.MiniSWESandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+            with pytest.raises(HTTPException) as error:
+                await agent.run(MagicMock(spec=Request), MiniSWERunRequest(responses_create_params={"input": []}))
+            assert error.value.status_code == 503
 
     warnings = [r.getMessage() for r in caplog.records if r.name == module.__name__]
-    assert warnings == ([module.DEPRECATION_WARNING] if legacy_run and not worker else [])
+    assert warnings == [module.DEPRECATION_WARNING]
     for phrase in (
         "legacy /run",
-        "gym eval run terminal_bench_4",
-        "Terminal-Bench-Science",
+        "single_agent_turn_legacy",
+        "terminal_bench_science/miniswe",
+        "gym eval run <tasks>",
         "README.md#harbor-episodes",
     ):
         assert phrase in module.DEPRECATION_WARNING

@@ -119,7 +119,63 @@ terminal_bench_science:
         sandbox_ready_timeout_s: 1200
         # Must exceed the longest per-task budget (8-hour agent, 12000-second verifier).
         default_exec_timeout_s: 64800
+      # The provider blocks below, named in each SandboxAccess the server lends (Environment Server sessions).
+      sandbox_provider_ref: terminal_bench_science_sandbox
+      sandbox_provider_refs:
+        cpu: terminal_bench_science_sandbox_cpu
+        gpu: terminal_bench_science_sandbox_gpu
       artifacts_dir: ${oc.select:tbsci_jobs_dir,results/terminal_bench_science/resources}
       max_concurrent_sessions: ${oc.select:tbsci_concurrency,8}
       # Covers agent setup plus the official 8-hour agent budget.
       seeded_session_timeout_sec: ${oc.select:tbsci_seeded_session_timeout_sec,36000}
+
+# The provider blocks a harness borrowing the task sandbox through SandboxAccess reconnects with: one deployment or,
+# with ++tbsci_split_sandbox_endpoints=true, the CPU or GPU one the task runs on. Each must reach the same deployment
+# as environment.sandbox_provider. The harness runs for the whole agent budget, so its status is polled, not streamed.
+terminal_bench_science_sandbox:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN,localhost}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY,null}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      background_exec: true
+      retries: 5
+      retry_delay_s: 5
+      retry_max_delay_s: 60
+      status_poll_timeout_s: 20
+
+terminal_bench_science_sandbox_cpu:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN_CPU,localhost}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY_CPU,null}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      background_exec: true
+      retries: 5
+      retry_delay_s: 5
+      retry_max_delay_s: 60
+      status_poll_timeout_s: 20
+
+terminal_bench_science_sandbox_gpu:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN_GPU,localhost}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY_GPU,null}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      background_exec: true
+      retries: 5
+      retry_delay_s: 5
+      retry_max_delay_s: 60
+      status_poll_timeout_s: 20

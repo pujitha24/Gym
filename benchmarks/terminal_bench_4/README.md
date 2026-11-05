@@ -6,7 +6,8 @@
 
 - `terminal_bench_4/miniswe`: mini-SWE **2.4.6** `DefaultAgent`, with upstream
   `mini.yaml` prompts, native bash tool calls through Gym's Responses model
-  adapter, and task-local MCP CLI.
+  adapter, and task-local MCP CLI. `single_agent_turn_legacy` runs each episode
+  on a task sandbox the resources server lends (see [Run](#run)).
 
 ## Artificial Analysis comparison
 
@@ -72,9 +73,11 @@ Set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for one deployment. For the
 established split deployment, set `OPENSANDBOX_DOMAIN_CPU`,
 `OPENSANDBOX_API_KEY_CPU`, `OPENSANDBOX_DOMAIN_GPU`, and
 `OPENSANDBOX_API_KEY_GPU`, then use `++tb4_split_sandbox_endpoints=true`.
-The resources server resolves credentials and returns the sandbox descriptor and
-connection configuration to the agent server, which reconnects for execution.
-Keep resolved configs and internal seed responses private.
+The resources server resolves credentials and lends the task sandbox's descriptor
+through `SandboxAccess`. The agent server reconnects for execution through the provider
+block the lease names: `terminal_bench_4_sandbox` in `resources.yaml`, or
+`terminal_bench_4_sandbox_cpu`/`_gpu` with split endpoints, which read the same
+variables. Keep resolved configs private.
 
 Agent and verifier select the endpoint independently from their official GPU
 requirements. The selected GPU deployment must supply H100s; its unsupported
@@ -109,11 +112,18 @@ gym eval run --benchmark terminal_bench_4/miniswe \
   ++use_absolute_ip=true ++tb4_split_sandbox_endpoints=true
 ```
 
-mini-SWE's loop runs in the resources process, using its existing sandbox and
-calling the Gym model server. The agent endpoint forwards the collector's run
-request and returns the result; it does not manage task environments.
-MCP tasks also need Python venv/pip
-for its pinned task-local `mcp==1.29.0` client.
+`single_agent_turn_legacy` runs each episode: it seeds the resources server, which
+provisions the task and lends its sandbox through `SandboxAccess`, then seeds mini-SWE
+with that sandbox. mini-SWE runs its loop inside the task sandbox and calls the Gym
+model server from there, so Gym servers must listen on an address the sandboxes
+reach (`++use_absolute_ip=true` or `++default_host=...`). The rows carry only the
+task identity: the resources server returns the official instruction as the seed's
+observation, and writes the task's MCP servers and skills directory to
+`/tmp/.nemo-gym/task.json` in the sandbox. The environment server closes mini-SWE,
+which stops its processes, before the resources server grades and cleans up.
+An episode is bounded by 54,000 seconds (`++tb4_episode_timeout_sec`), which covers
+setup, the 8-hour agent budget, and the slowest verifier. MCP tasks also need
+Python venv/pip for its pinned task-local `mcp==1.29.0` client.
 
 Select tasks during preparation:
 
@@ -151,9 +161,10 @@ successful model run.
 Infrastructure failures carry `infrastructure_error` and `_ng_failure_class` and
 must be excluded from model-negative aggregates.
 
-The standalone smoke runner starts real Gym HTTP agent, resources, and model
-servers on loopback. The agent runs mini-SWE and calls the Gym model server;
-resources owns task provisioning, grading, and cleanup.
+The standalone smoke runner starts real Gym HTTP environment, agent, resources, and
+model servers and posts each task row to the profile's `single_agent_turn_legacy`
+server, as a benchmark run does. The agent runs mini-SWE in the lent sandbox and calls
+the Gym model server; resources owns task provisioning, grading, and cleanup.
 It requires the existing sandbox endpoint credentials and `OPENAI_API_KEY`.
 
 ```sh

@@ -288,7 +288,11 @@ A trial whose official evaluation did not complete, such as a verifier timeout, 
 
 `terminal_bench_science/miniswe` runs mini-SWE 2.4.6 through
 [`miniswe_sandboxed_agent`](../../responses_api_agents/miniswe_sandboxed_agent/README.md).
-It uses Gym's model server, so model calls and training tokens are captured.
+It uses Gym's model server, so model calls and training tokens are captured. As for Codex
+below, `single_agent_turn_legacy` runs each episode: the resources server lends the task sandbox
+through `SandboxAccess`, mini-SWE runs in it, and the episode closes mini-SWE before grading.
+Rows carry only the task identity; the resources server returns the official instruction as the
+seed's observation (`instruction_observation`), which mini-SWE renders with its `mini.yaml` prompts.
 
 The defaults follow Harbor's built-in `mini-swe-agent`:
 
@@ -314,7 +318,8 @@ through [`codex_agent`](../../responses_api_agents/codex_agent/README.md), compo
 resources server and `single_agent_turn_legacy`, which seeds both, closes Codex before grading,
 then closes the resources session. The resources server lends the task sandbox through
 `SandboxAccess` (see its README); grading, partial credit, artifacts and cleanup are the same
-as for mini-SWE. Defaults:
+as for mini-SWE. Both profiles reconnect through the provider blocks in `resources.yaml`
+(`terminal_bench_science_sandbox`, or its `_cpu`/`_gpu` variants with split endpoints). Defaults:
 
 - Codex `0.155.1` (`++tbsci_codex_version`), installed in the sandbox with a private Node.
 - The task's 8-hour budget as Codex's timeout (`++tbsci_agent_timeout_sec`).
